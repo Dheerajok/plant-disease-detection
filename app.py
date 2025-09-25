@@ -1,90 +1,148 @@
-from flask import Flask, render_template,request,redirect,send_from_directory,url_for
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import numpy as np
 import json
-import uuid
 import tensorflow as tf
+import base64
+import io
+from PIL import Image
+import os
 
 app = Flask(__name__)
-model = tf.keras.models.load_model("models/plant_disease_recog_model_pwp.keras")
-label = ['Apple___Apple_scab',
- 'Apple___Black_rot',
- 'Apple___Cedar_apple_rust',
- 'Apple___healthy',
- 'Background_without_leaves',
- 'Blueberry___healthy',
- 'Cherry___Powdery_mildew',
- 'Cherry___healthy',
- 'Corn___Cercospora_leaf_spot Gray_leaf_spot',
- 'Corn___Common_rust',
- 'Corn___Northern_Leaf_Blight',
- 'Corn___healthy',
- 'Grape___Black_rot',
- 'Grape___Esca_(Black_Measles)',
- 'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)',
- 'Grape___healthy',
- 'Orange___Haunglongbing_(Citrus_greening)',
- 'Peach___Bacterial_spot',
- 'Peach___healthy',
- 'Pepper,_bell___Bacterial_spot',
- 'Pepper,_bell___healthy',
- 'Potato___Early_blight',
- 'Potato___Late_blight',
- 'Potato___healthy',
- 'Raspberry___healthy',
- 'Soybean___healthy',
- 'Squash___Powdery_mildew',
- 'Strawberry___Leaf_scorch',
- 'Strawberry___healthy',
- 'Tomato___Bacterial_spot',
- 'Tomato___Early_blight',
- 'Tomato___Late_blight',
- 'Tomato___Leaf_Mold',
- 'Tomato___Septoria_leaf_spot',
- 'Tomato___Spider_mites Two-spotted_spider_mite',
- 'Tomato___Target_Spot',
- 'Tomato___Tomato_Yellow_Leaf_Curl_Virus',
- 'Tomato___Tomato_mosaic_virus',
- 'Tomato___healthy']
+CORS(app)  # Enable CORS
 
-with open("plant_disease.json",'r') as file:
-    plant_disease = json.load(file)
-
-# print(plant_disease[4])
-
-@app.route('/uploadimages/<path:filename>')
-def uploaded_images(filename):
-    return send_from_directory('./uploadimages', filename)
-
-@app.route('/',methods = ['GET'])
-def home():
-    return render_template('home.html')
-
-def extract_features(image):
-    image = tf.keras.utils.load_img(image,target_size=(160,160))
-    feature = tf.keras.utils.img_to_array(image)
-    feature = np.array([feature])
-    return feature
-
-def model_predict(image):
-    img = extract_features(image)
-    prediction = model.predict(img)
-    # print(prediction)
-    prediction_label = plant_disease[prediction.argmax()]
-    return prediction_label
-
-@app.route('/upload/',methods = ['POST','GET'])
-def uploadimage():
-    if request.method == "POST":
-        image = request.files['img']
-        temp_name = f"uploadimages/temp_{uuid.uuid4().hex}"
-        image.save(f'{temp_name}_{image.filename}')
-        print(f'{temp_name}_{image.filename}')
-        prediction = model_predict(f'./{temp_name}_{image.filename}')
-        return render_template('home.html',result=True,imagepath = f'/{temp_name}_{image.filename}', prediction = prediction )
+# Load your model
+try:
+    model = tf.keras.models.load_model("plant_disease_model_lite.keras")
+    with open("plant_disease_info.json", 'r') as f:
+        disease_info = json.load(f)
     
-    else:
-        return redirect('/')
+    class_names = disease_info['classes']
+    IMG_SIZE = disease_info['input_shape'][0]
+    print(f"✅ Model loaded successfully with {len(class_names)} classes")
+    
+except Exception as e:
+    print(f"❌ Error loading model: {e}")
+    model = None
+    class_names = {}
+    IMG_SIZE = 160
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "message": "Plant Disease Detection API is running",
+        "model_loaded": model is not None,
+        "total_classes": len(class_names),
+        "image_size": IMG_SIZE,
+        "endpoints": {
+            "health": "/api/health (GET)",
+            "predict": "/api/predict (POST)"
+        }
+    })
+
+@app.route('/api/predict', methods=['POST'])
+def predict_disease():
+    """API endpoint for plant disease prediction"""
+    try:
+        if model is None:
+            return jsonify({
+                "success": False, 
+                "error": "Model not loaded"
+            }), 500
+
+        # Handle file upload
+        if 'image' not in request.files:
+            return jsonify({
+                "success": False, 
+                "error": "No image file provided. Use 'image' as the key."
+            }), 400
+
+        image_file = request.files['image']
         
-    
-if __name__ == "__main__":
-    app.run(debug=True)
+        if image_file.filename == '':
+            return jsonify({
+                "success": False, 
+                "error": "No file selected"
+            }), 400
+
+        # Process image
+        image = Image.open(image_file)
+        original_size = image.size
+        
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        image = image.resize((IMG_SIZE, IMG_SIZE))
+        img_array = np.array(image, dtype=np.float32) / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
+
+        # Make prediction
+        predictions = model.predict(img_array, verbose=0)
+        predicted_class_index = np.argmax(predictions)
+        confidence = float(np.max(predictions))
+        
+        predicted_disease = class_names.get(str(predicted_class_index), "Unknown")
+        
+        # Parse disease information
+        disease_parts = predicted_disease.split('___')
+        plant_type = disease_parts[0].replace('_', ' ').title() if len(disease_parts) > 1 else "Unknown"
+        disease_name = disease_parts[1].replace('_', ' ').title() if len(disease_parts) > 1 else predicted_disease
+        is_healthy = 'healthy' in predicted_disease.lower()
+
+        # Get top 3 predictions
+        top_3_indices = np.argsort(predictions[0])[-3:][::-1]
+        top_predictions = []
+        for idx in top_3_indices:
+            disease = class_names.get(str(idx), f"Class_{idx}")
+            conf = float(predictions[0][idx])
+            top_predictions.append({
+                "disease": disease,
+                "confidence": conf,
+                "confidence_percent": f"{conf:.1%}"
+            })
+
+        return jsonify({
+            "success": True,
+            "timestamp": str(np.datetime64('now')),
+            "prediction": {
+                "disease": predicted_disease,
+                "plant_type": plant_type,
+                "disease_name": disease_name,
+                "is_healthy": is_healthy,
+                "confidence": confidence,
+                "confidence_percent": f"{confidence:.1%}"
+            },
+            "top_predictions": top_predictions,
+            "image_info": {
+                "original_size": original_size,
+                "processed_size": [IMG_SIZE, IMG_SIZE],
+                "filename": image_file.filename
+            }
+        })
+
+    except Exception as e:
+        return jsonify({
+            "success": False, 
+            "error": str(e),
+            "error_type": type(e).__name__
+        }), 500
+
+@app.route('/api/classes', methods=['GET'])
+def get_classes():
+    """Get all available disease classes"""
+    return jsonify({
+        "success": True,
+        "total_classes": len(class_names),
+        "classes": class_names
+    })
+
+if __name__ == '__main__':
+    print("🚀 Starting Plant Disease Detection API...")
+    print("📍 API will be available at: http://localhost:5001")
+    print("🔍 Test endpoints:")
+    print("   GET  /api/health  - Health check")
+    print("   POST /api/predict - Disease prediction")
+    print("   GET  /api/classes - List all classes")
+    app.run(debug=True, port=5001, host='0.0.0.0')
