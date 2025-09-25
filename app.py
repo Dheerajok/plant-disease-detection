@@ -9,42 +9,65 @@ from PIL import Image
 import os
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS
+CORS(app)
 
-# Load your model
-try:
-    model = tf.keras.models.load_model("plant_disease_model_lite.keras")
-    with open("plant_disease_info.json", 'r') as f:
-        disease_info = json.load(f)
+# Global variables for model
+model = None
+class_names = {}
+IMG_SIZE = 160
+
+def load_model():
+    """Load model and class information once at startup"""
+    global model, class_names, IMG_SIZE
     
-    class_names = disease_info['classes']
-    IMG_SIZE = disease_info['input_shape'][0]
-    print(f"✅ Model loaded successfully with {len(class_names)} classes")
-    
-except Exception as e:
-    print(f"❌ Error loading model: {e}")
-    model = None
-    class_names = {}
-    IMG_SIZE = 160
+    try:
+        # Load TensorFlow model
+        model = tf.keras.models.load_model("plant_disease_model_lite.keras")
+        print("✅ Model loaded successfully")
+        
+        # Load class information
+        with open("plant_disease_info.json", 'r') as f:
+            disease_info = json.load(f)
+        
+        class_names = disease_info['classes']
+        IMG_SIZE = disease_info['input_shape'][0]
+        print(f"✅ Loaded {len(class_names)} disease classes")
+        
+    except Exception as e:
+        print(f"❌ Error loading model: {e}")
+        model = None
+
+# Load model when the application starts
+load_model()
+
+@app.route('/', methods=['GET'])
+def home():
+    """Home endpoint"""
+    return jsonify({
+        "message": "🌱 Plant Disease Detection API",
+        "status": "running",
+        "model_loaded": model is not None,
+        "endpoints": {
+            "health": "/api/health (GET)",
+            "predict": "/api/predict (POST)",
+            "classes": "/api/classes (GET)"
+        }
+    })
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "message": "Plant Disease Detection API is running",
+        "message": "Plant Disease Detection API is running on Render",
         "model_loaded": model is not None,
         "total_classes": len(class_names),
-        "image_size": IMG_SIZE,
-        "endpoints": {
-            "health": "/api/health (GET)",
-            "predict": "/api/predict (POST)"
-        }
+        "image_size": IMG_SIZE
     })
 
 @app.route('/api/predict', methods=['POST'])
 def predict_disease():
-    """API endpoint for plant disease prediction"""
+    """Disease prediction endpoint"""
     try:
         if model is None:
             return jsonify({
@@ -52,7 +75,7 @@ def predict_disease():
                 "error": "Model not loaded"
             }), 500
 
-        # Handle file upload
+        # Validate file upload
         if 'image' not in request.files:
             return jsonify({
                 "success": False, 
@@ -105,7 +128,6 @@ def predict_disease():
 
         return jsonify({
             "success": True,
-            "timestamp": str(np.datetime64('now')),
             "prediction": {
                 "disease": predicted_disease,
                 "plant_type": plant_type,
@@ -138,11 +160,16 @@ def get_classes():
         "classes": class_names
     })
 
+# Production-ready configuration
 if __name__ == '__main__':
-    print("🚀 Starting Plant Disease Detection API...")
-    print("📍 API will be available at: http://localhost:5001")
-    print("🔍 Test endpoints:")
-    print("   GET  /api/health  - Health check")
-    print("   POST /api/predict - Disease prediction")
-    print("   GET  /api/classes - List all classes")
-    app.run(debug=True, port=5001, host='0.0.0.0')
+    port = int(os.environ.get('PORT', 5000))
+    debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    
+    print(f"🚀 Starting Flask app on port {port}")
+    print(f"🔧 Debug mode: {debug_mode}")
+    
+    app.run(
+        host='0.0.0.0', 
+        port=port, 
+        debug=debug_mode
+    )
