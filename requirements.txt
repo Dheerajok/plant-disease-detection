@@ -1,5 +1,6 @@
+Flask
+flask-cors
 tensorflow
-numpy
 Pillow
-pandas
-matplotlib
+numpy
+gunicorn
